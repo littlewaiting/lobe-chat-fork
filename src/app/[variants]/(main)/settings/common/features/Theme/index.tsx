@@ -1,10 +1,9 @@
 'use client';
 
-import { Form, type ItemGroup, SelectWithImg, SliderWithInput } from '@lobehub/ui';
-import { Select } from 'antd';
+import { Form, type FormGroupItemType, ImageSelect, SliderWithInput } from '@lobehub/ui';
+import { Select } from '@lobehub/ui';
 import isEqual from 'fast-deep-equal';
 import { Monitor, Moon, Sun } from 'lucide-react';
-import { useRouter } from 'next/navigation';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -12,34 +11,34 @@ import { useSyncSettings } from '@/app/[variants]/(main)/settings/hooks/useSyncS
 import { FORM_STYLE } from '@/const/layoutTokens';
 import { imageUrl } from '@/const/url';
 import { Locales, localeOptions } from '@/locales/resources';
+import { useGlobalStore } from '@/store/global';
+import { systemStatusSelectors } from '@/store/global/selectors';
 import { useUserStore } from '@/store/user';
-import { settingsSelectors, userGeneralSettingsSelectors } from '@/store/user/selectors';
-import { switchLang } from '@/utils/client/switchLang';
+import { settingsSelectors } from '@/store/user/selectors';
 
 import { ThemeSwatchesNeutral, ThemeSwatchesPrimary } from './ThemeSwatches';
 
-type SettingItemGroup = ItemGroup;
-
 const Theme = memo(() => {
   const { t } = useTranslation('setting');
-  const router = useRouter();
+
   const [form] = Form.useForm();
   const settings = useUserStore(settingsSelectors.currentSettings, isEqual);
-  const themeMode = useUserStore(userGeneralSettingsSelectors.currentThemeMode);
-  const [setThemeMode, setSettings] = useUserStore((s) => [s.switchThemeMode, s.setSettings]);
+  const themeMode = useGlobalStore(systemStatusSelectors.themeMode);
+  const [setSettings] = useUserStore((s) => [s.setSettings]);
+  const [setThemeMode] = useGlobalStore((s) => [s.switchThemeMode]);
 
   useSyncSettings(form);
+  const [switchLocale] = useGlobalStore((s) => [s.switchLocale]);
 
   const handleLangChange = (value: Locales) => {
-    switchLang(value);
-    router.refresh();
+    switchLocale(value);
   };
 
-  const theme: SettingItemGroup = {
+  const theme: FormGroupItemType = {
     children: [
       {
         children: (
-          <SelectWithImg
+          <ImageSelect
             height={60}
             onChange={setThemeMode}
             options={[
@@ -138,7 +137,7 @@ const Theme = memo(() => {
       items={[theme]}
       itemsType={'group'}
       onValuesChange={setSettings}
-      variant={'pure'}
+      variant={'borderless'}
       {...FORM_STYLE}
     />
   );

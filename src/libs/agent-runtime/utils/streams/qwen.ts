@@ -4,17 +4,37 @@ import { ChatCompletionContentPart } from 'openai/resources/index.mjs';
 import type { Stream } from 'openai/streaming';
 
 import { ChatStreamCallbacks } from '../../types';
+import { convertUsage } from '../usageConverter';
 import {
+  StreamContext,
   StreamProtocolChunk,
   StreamProtocolToolCallChunk,
   StreamToolCallChunkData,
   convertIterableToStream,
   createCallbacksTransformer,
   createSSEProtocolTransformer,
+  createTokenSpeedCalculator,
   generateToolCallId,
 } from './protocol';
 
-export const transformQwenStream = (chunk: OpenAI.ChatCompletionChunk): StreamProtocolChunk => {
+export const transformQwenStream = (
+  chunk: OpenAI.ChatCompletionChunk,
+  streamContext?: StreamContext,
+): StreamProtocolChunk | StreamProtocolChunk[] => {
+  if (Array.isArray(chunk.choices) && chunk.choices.length === 0 && chunk.usage) {
+    const usage = convertUsage({
+      ...chunk.usage,
+      completion_tokens_details: chunk.usage.completion_tokens_details || {},
+      prompt_tokens_details: chunk.usage.prompt_tokens_details || {},
+    });
+
+    if (streamContext) {
+      streamContext.usage = usage;
+    }
+
+    return { data: usage, id: chunk.id, type: 'usage' };
+  }
+
   const item = chunk.choices[0];
 
   if (!item) {
@@ -61,6 +81,16 @@ export const transformQwenStream = (chunk: OpenAI.ChatCompletionChunk): StreamPr
     } as StreamProtocolToolCallChunk;
   }
 
+  // DeepSeek reasoner will put thinking in the reasoning_content field
+  if (
+    item.delta &&
+    'reasoning_content' in item.delta &&
+    typeof item.delta.reasoning_content === 'string' &&
+    item.delta.reasoning_content !== ''
+  ) {
+    return { data: item.delta.reasoning_content, id: chunk.id, type: 'reasoning' };
+  }
+
   if (typeof item.delta?.content === 'string') {
     return { data: item.delta.content, id: chunk.id, type: 'text' };
   }
@@ -82,12 +112,18 @@ export const transformQwenStream = (chunk: OpenAI.ChatCompletionChunk): StreamPr
 
 export const QwenAIStream = (
   stream: Stream<OpenAI.ChatCompletionChunk> | ReadableStream,
-  callbacks?: ChatStreamCallbacks,
+  // TODO: preserve for RFC 097
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars, unused-imports/no-unused-vars
+  { callbacks, inputStartAt }: { callbacks?: ChatStreamCallbacks; inputStartAt?: number } = {},
 ) => {
+  const streamContext: StreamContext = { id: '' };
   const readableStream =
     stream instanceof ReadableStream ? stream : convertIterableToStream(stream);
 
   return readableStream
-    .pipeThrough(createSSEProtocolTransformer(transformQwenStream))
+    .pipeThrough(
+      createTokenSpeedCalculator(transformQwenStream, { inputStartAt, streamStack: streamContext }),
+    )
+    .pipeThrough(createSSEProtocolTransformer((c) => c, streamContext))
     .pipeThrough(createCallbacksTransformer(callbacks));
 };

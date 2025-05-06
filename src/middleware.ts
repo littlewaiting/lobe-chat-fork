@@ -1,15 +1,29 @@
 import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+import debug from 'debug';
 import { NextRequest, NextResponse } from 'next/server';
 import { UAParser } from 'ua-parser-js';
+import urlJoin from 'url-join';
 
+import { appEnv } from '@/config/app';
 import { authEnv } from '@/config/auth';
+import { LOBE_LOCALE_COOKIE } from '@/const/locale';
 import { LOBE_THEME_APPEARANCE } from '@/const/theme';
 import NextAuthEdge from '@/libs/next-auth/edge';
 import { Locales } from '@/locales/resources';
 import { parseBrowserLanguage } from '@/utils/locale';
+import { parseDefaultThemeFromCountry } from '@/utils/server/geo';
 import { RouteVariants } from '@/utils/server/routeVariants';
 
 import { OAUTH_AUTHORIZED } from './const/auth';
+import { oidcEnv } from './envs/oidc';
+
+// Create debug logger instances
+const logDefault = debug('lobe-middleware:default');
+const logNextAuth = debug('lobe-middleware:next-auth');
+const logClerk = debug('lobe-middleware:clerk');
+
+// OIDC session pre-sync constant
+const OIDC_SESSION_HEADER = 'x-oidc-session-sync';
 
 export const config = {
   matcher: [
@@ -32,59 +46,71 @@ export const config = {
 
     '/login(.*)',
     '/signup(.*)',
-    '/next-auth/error',
+    '/next-auth/(.*)',
+    '/oauth(.*)',
+    '/oidc(.*)',
     // ↓ cloud ↓
   ],
 };
 
-const parseDefaultThemeFromTime = (request: NextRequest) => {
-  // 获取经度信息，Next.js 会自动解析 geo 信息到请求对象中
-  const longitude = 'geo' in request && (request.geo as any)?.longitude;
-
-  if (typeof longitude === 'number') {
-    // 计算时区偏移（每15度经度对应1小时）
-    // 东经为正，西经为负
-    const offsetHours = Math.round(longitude / 15);
-
-    // 计算当地时间
-    const localHour = (new Date().getUTCHours() + offsetHours + 24) % 24;
-    console.log(`[theme] localHour: ${localHour}`);
-
-    // 6点到18点之间返回 light 主题
-    return localHour >= 6 && localHour < 18 ? 'light' : 'dark';
-  }
-
-  return 'light';
-};
+const backendApiEndpoints = ['/api', '/trpc', '/webapi', '/oidc'];
 
 const defaultMiddleware = (request: NextRequest) => {
-  // 1. 从 cookie 中读取用户偏好
+  const url = new URL(request.url);
+  logDefault('Processing request: %s %s', request.method, request.url);
+
+  // skip all api requests
+  if (backendApiEndpoints.some((path) => url.pathname.startsWith(path))) {
+    logDefault('Skipping API request: %s', url.pathname);
+    return NextResponse.next();
+  }
+
+  // 1. Read user preferences from cookies
   const theme =
-    request.cookies.get(LOBE_THEME_APPEARANCE)?.value || parseDefaultThemeFromTime(request);
+    request.cookies.get(LOBE_THEME_APPEARANCE)?.value || parseDefaultThemeFromCountry(request);
 
   // if it's a new user, there's no cookie
   // So we need to use the fallback language parsed by accept-language
-  const locale = parseBrowserLanguage(request.headers) as Locales;
-  // const locale =
-  // request.cookies.get(LOBE_LOCALE_COOKIE)?.value ||
-  // browserLanguage;
+  const browserLanguage = parseBrowserLanguage(request.headers);
+  const locale = (request.cookies.get(LOBE_LOCALE_COOKIE)?.value || browserLanguage) as Locales;
 
   const ua = request.headers.get('user-agent');
 
   const device = new UAParser(ua || '').getDevice();
 
-  // 2. 创建规范化的偏好值
+  logDefault('User preferences: %O', {
+    browserLanguage,
+    deviceType: device.type,
+    hasCookies: {
+      locale: !!request.cookies.get(LOBE_LOCALE_COOKIE)?.value,
+      theme: !!request.cookies.get(LOBE_THEME_APPEARANCE)?.value,
+    },
+    locale,
+    theme,
+  });
+
+  // 2. Create normalized preference values
   const route = RouteVariants.serializeVariants({
     isMobile: device.type === 'mobile',
     locale,
     theme,
   });
 
-  const url = new URL(request.url);
+  logDefault('Serialized route variant: %s', route);
 
-  // skip all api requests
-  if (['/api', '/trpc', '/webapi'].some((path) => url.pathname.startsWith(path))) {
-    return NextResponse.next();
+  // if app is in docker, rewrite to self container
+  // https://github.com/lobehub/lobe-chat/issues/5876
+  if (appEnv.MIDDLEWARE_REWRITE_THROUGH_LOCAL) {
+    logDefault('Local container rewrite enabled: %O', {
+      host: '127.0.0.1',
+      original: url.toString(),
+      port: process.env.PORT || '3210',
+      protocol: 'http',
+    });
+
+    url.protocol = 'http';
+    url.host = '127.0.0.1';
+    url.port = process.env.PORT || '3210';
   }
 
   // refs: https://github.com/lobehub/lobe-chat/pull/5866
@@ -92,7 +118,16 @@ const defaultMiddleware = (request: NextRequest) => {
   // / -> /zh-CN__0__dark
   // /discover -> /zh-CN__0__dark/discover
   const nextPathname = `/${route}` + (url.pathname === '/' ? '' : url.pathname);
-  console.log(`[rewrite] ${url.pathname} -> ${nextPathname}`);
+  const nextURL = appEnv.MIDDLEWARE_REWRITE_THROUGH_LOCAL
+    ? urlJoin(url.origin, nextPathname)
+    : nextPathname;
+
+  logDefault('URL rewrite: %O', {
+    isLocalRewrite: appEnv.MIDDLEWARE_REWRITE_THROUGH_LOCAL,
+    nextPathname: nextPathname,
+    nextURL: nextURL,
+    originalPathname: url.pathname,
+  });
 
   url.pathname = nextPathname;
 
@@ -101,6 +136,8 @@ const defaultMiddleware = (request: NextRequest) => {
 
 // Initialize an Edge compatible NextAuth middleware
 const nextAuthMiddleware = NextAuthEdge.auth((req) => {
+  logNextAuth('NextAuth middleware processing request: %s %s', req.method, req.url);
+
   const response = defaultMiddleware(req);
 
   // Just check if session exists
@@ -110,10 +147,25 @@ const nextAuthMiddleware = NextAuthEdge.auth((req) => {
   // refs: https://github.com/lobehub/lobe-chat/pull/1323
   const isLoggedIn = !!session?.expires;
 
+  logNextAuth('NextAuth session status: %O', {
+    expires: session?.expires,
+    isLoggedIn,
+    userId: session?.user?.id,
+  });
+
   // Remove & amend OAuth authorized header
   response.headers.delete(OAUTH_AUTHORIZED);
   if (isLoggedIn) {
+    logNextAuth('Setting auth header: %s = %s', OAUTH_AUTHORIZED, 'true');
     response.headers.set(OAUTH_AUTHORIZED, 'true');
+
+    // If OIDC is enabled and user is logged in, add OIDC session pre-sync header
+    if (oidcEnv.ENABLE_OIDC && session?.user?.id) {
+      logNextAuth('OIDC session pre-sync: Setting %s = %s', OIDC_SESSION_HEADER, session.user.id);
+      response.headers.set(OIDC_SESSION_HEADER, session.user.id);
+    }
+  } else {
+    logNextAuth('Not logged in, no auth header set');
   }
 
   return response;
@@ -123,14 +175,39 @@ const isProtectedRoute = createRouteMatcher([
   '/settings(.*)',
   '/files(.*)',
   '/onboard(.*)',
+  '/oauth(.*)',
   // ↓ cloud ↓
 ]);
 
 const clerkAuthMiddleware = clerkMiddleware(
   async (auth, req) => {
-    if (isProtectedRoute(req)) await auth.protect();
+    logClerk('Clerk middleware processing request: %s %s', req.method, req.url);
 
-    return defaultMiddleware(req);
+    const isProtected = isProtectedRoute(req);
+    logClerk('Route protection status: %s, %s', req.url, isProtected ? 'protected' : 'public');
+
+    if (isProtected) {
+      logClerk('Protecting route: %s', req.url);
+      await auth.protect();
+    }
+
+    const response = defaultMiddleware(req);
+
+    const data = await auth();
+    logClerk('Clerk auth status: %O', {
+      isSignedIn: !!data.userId,
+      userId: data.userId,
+    });
+
+    // If OIDC is enabled and Clerk user is logged in, add OIDC session pre-sync header
+    if (oidcEnv.ENABLE_OIDC && data.userId) {
+      logClerk('OIDC session pre-sync: Setting %s = %s', OIDC_SESSION_HEADER, data.userId);
+      response.headers.set(OIDC_SESSION_HEADER, data.userId);
+    } else if (oidcEnv.ENABLE_OIDC) {
+      logClerk('No Clerk user detected, not setting OIDC session sync header');
+    }
+
+    return response;
   },
   {
     // https://github.com/lobehub/lobe-chat/pull/3084
@@ -139,6 +216,12 @@ const clerkAuthMiddleware = clerkMiddleware(
     signUpUrl: '/signup',
   },
 );
+
+logDefault('Middleware configuration: %O', {
+  enableClerk: authEnv.NEXT_PUBLIC_ENABLE_CLERK_AUTH,
+  enableNextAuth: authEnv.NEXT_PUBLIC_ENABLE_NEXT_AUTH,
+  enableOIDC: oidcEnv.ENABLE_OIDC,
+});
 
 export default authEnv.NEXT_PUBLIC_ENABLE_CLERK_AUTH
   ? clerkAuthMiddleware

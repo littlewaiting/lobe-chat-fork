@@ -1,6 +1,7 @@
 'use client';
 
 import { Tabs } from '@lobehub/ui';
+import { Skeleton } from 'antd';
 import { useTheme } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import { useQueryState } from 'nuqs';
@@ -10,23 +11,34 @@ import { INBOX_SESSION_ID } from '@/const/session';
 import { AgentSettings } from '@/features/AgentSetting';
 import { useCategory } from '@/features/AgentSetting/AgentCategory/useCategory';
 import { ChatSettingsTabs } from '@/store/global/initialState';
-import { useServerConfigStore } from '@/store/serverConfig';
 import { useUserStore } from '@/store/user';
 import { settingsSelectors } from '@/store/user/selectors';
+import DesktopLayout from './_layout/Desktop'
+import MobileLayout from './_layout/Mobile'
 
-const Page = memo(() => {
+type AgentPageType = {
+  mobile?: boolean;
+}
+
+const Page = memo((props: AgentPageType) => {
+  const { mobile } = props
   const cateItems = useCategory();
   const [tab, setTab] = useQueryState('tab', {
     defaultValue: ChatSettingsTabs.Prompt,
   });
   const config = useUserStore(settingsSelectors.defaultAgentConfig, isEqual);
   const meta = useUserStore(settingsSelectors.defaultAgentMeta, isEqual);
-  const [updateAgent] = useUserStore((s) => [s.updateDefaultAgent]);
-  const isUserStateInit = useUserStore((s) => s.isUserStateInit);
-  const theme = useTheme();
-  const mobile = useServerConfigStore((s) => s.isMobile);
+  const [updateAgent, isUserStateInit] = useUserStore((s) => [
+    s.updateDefaultAgent,
+    s.isUserStateInit,
+  ]);
 
-  return (
+  const theme = useTheme();
+
+  if (!isUserStateInit) return <Skeleton active paragraph={{ rows: 5 }} title={false} />;
+
+
+  const PageContent = (
     <>
       {mobile && (
         <Tabs
@@ -53,7 +65,12 @@ const Page = memo(() => {
         tab={tab as ChatSettingsTabs}
       />
     </>
-  );
+  )
+
+  return mobile ? <MobileLayout>
+    {PageContent}
+  </MobileLayout> : <DesktopLayout>
+    {PageContent}</DesktopLayout>;
 });
 
 Page.displayName = 'AgentSetting';

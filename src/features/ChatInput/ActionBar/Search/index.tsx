@@ -1,23 +1,29 @@
 import { GlobeOffIcon } from '@lobehub/ui/icons';
 import { useTheme } from 'antd-style';
 import { Globe } from 'lucide-react';
-import { memo, useState } from 'react';
+import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isDeprecatedEdition } from '@/const/version';
 import { useAgentEnableSearch } from '@/hooks/useAgentEnableSearch';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { useAgentStore } from '@/store/agent';
 import { agentSelectors } from '@/store/agent/selectors';
+import { agentChatConfigSelectors } from '@/store/agent/slices/chat';
 
 import Action from '../components/Action';
 import Controls from './Controls';
 
 const Search = memo(() => {
   const { t } = useTranslation('chat');
-  const [isLoading] = useAgentStore((s) => [agentSelectors.isAgentConfigLoading(s)]);
-  const [updating, setUpdating] = useState(false);
+  const [isLoading, mode, updateAgentChatConfig] = useAgentStore((s) => [
+    agentSelectors.isAgentConfigLoading(s),
+    agentChatConfigSelectors.agentSearchMode(s),
+    s.updateAgentChatConfig,
+  ]);
   const isAgentEnableSearch = useAgentEnableSearch();
   const theme = useTheme();
+  const isMobile = useIsMobile();
 
   if (isDeprecatedEdition) return null;
   if (isLoading) return <Action disabled icon={GlobeOffIcon} />;
@@ -26,9 +32,18 @@ const Search = memo(() => {
     <Action
       color={isAgentEnableSearch ? theme.colorInfo : undefined}
       icon={isAgentEnableSearch ? Globe : GlobeOffIcon}
-      loading={updating}
+      onClick={
+        isMobile
+          ? undefined
+          : async (e) => {
+            e?.preventDefault?.();
+            e?.stopPropagation?.();
+            const next = mode === 'off' ? 'auto' : 'off';
+            await updateAgentChatConfig({ searchMode: next });
+          }
+      }
       popover={{
-        content: <Controls setUpdating={setUpdating} updating={updating} />,
+        content: <Controls />,
         maxWidth: 320,
         minWidth: 320,
         placement: 'topLeft',
@@ -37,6 +52,7 @@ const Search = memo(() => {
             padding: 4,
           },
         },
+        trigger: isMobile ? ['click'] : ['hover'],
       }}
       showTooltip={false}
       title={t('search.title')}
